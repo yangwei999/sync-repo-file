@@ -6,7 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opensourceways/community-robot-lib/kafka"
+	"github.com/opensourceways/community-robot-lib/mq"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -21,6 +24,14 @@ type taskInfo struct {
 	branchSHA string
 	files     []string
 	retryNum  int
+}
+
+type msgTask struct {
+	Org       string   `json:"org"`
+	Repo      string   `json:"repo"`
+	Branch    string   `json:"branch"`
+	BranchSHA string   `json:"branchSHA"`
+	Files     []string `json:"files"`
 }
 
 func (t taskInfo) toString() string {
@@ -95,6 +106,7 @@ type taskExecutor struct {
 	maxRetry    int
 	waitOnQueue time.Duration
 	idleTimeOut time.Duration
+	topic       string
 }
 
 func (w *taskExecutor) run(ctx context.Context) {
@@ -123,7 +135,7 @@ func (w *taskExecutor) execTask(t *taskInfo) {
 	if t.branch == "" {
 		w.listBranch(t)
 	} else {
-		w.syncFile(t)
+		w.sendToMQ(t)
 	}
 }
 
@@ -202,21 +214,32 @@ func (w *taskExecutor) listBranch(t *taskInfo) {
 				break
 			}
 
-			w.syncFile(nt)
+			w.sendToMQ(nt)
 		}
 	}
 }
 
-func (w *taskExecutor) syncFile(t *taskInfo) {
-	f := func(t *taskInfo) error {
-		err := t.cli.SyncFileOfBranch(t.org, t.repo, t.branch, t.branchSHA, t.files)
-		if err != nil {
-			logrus.WithError(err).Errorf("sync file of repo:%s", t.toString())
-		}
-		return err
+func (w *taskExecutor) sendToMQ(t *taskInfo) {
+	mt := msgTask{
+		Org:       t.org,
+		Repo:      t.repo,
+		Branch:    t.branch,
+		BranchSHA: t.branchSHA,
+		Files:     t.files,
 	}
 
-	w.try(t, f)
+	body, err := json.Marshal(mt)
+	if err != nil {
+		logrus.Error("marshal msgTask failed")
+	}
+
+	msg := mq.Message{
+		Body: body,
+	}
+
+	if err = kafka.Publish(w.topic, &msg); err != nil {
+		logrus.Errorf("publish msgTask failed:%s", err.Error())
+	}
 }
 
 func (w *taskExecutor) try(t *taskInfo, tryOnce func(t *taskInfo) error) error {

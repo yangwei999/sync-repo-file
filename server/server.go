@@ -19,10 +19,11 @@ type SyncFileClient interface {
 	SyncFileOfBranch(org, repo, branch, branchSHA string, files []string) error
 }
 
-func DoOnce(clients map[string]SyncFileClient, cfg []SyncFileConfig, concurrentSize int) (func(), func()) {
+func DoOnce(clients map[string]SyncFileClient, cfg []SyncFileConfig, concurrentSize int, topic string) (func(), func()) {
 	w := worker{
 		clients: clients,
 		queue:   newTaskQueue(concurrentSize),
+		topic:   topic,
 	}
 
 	logrus.Info("start doing once")
@@ -30,10 +31,8 @@ func DoOnce(clients map[string]SyncFileClient, cfg []SyncFileConfig, concurrentS
 	ctx, cancel := context.WithCancel(context.Background())
 
 	w.produce(ctx, cfg)
-	// there are 3 kinds of task.
-	for i := 0; i < 3; i++ {
-		w.consume(ctx)
-	}
+
+	w.consume(ctx)
 
 	return w.wait, cancel
 }
@@ -43,6 +42,7 @@ type worker struct {
 
 	wg    sync.WaitGroup
 	queue *taskQueue
+	topic string
 }
 
 func (w *worker) wait() {
@@ -101,6 +101,7 @@ func (w *worker) consume(ctx context.Context) {
 			maxRetry:    3,
 			waitOnQueue: 10 * time.Millisecond,
 			idleTimeOut: 3 * time.Second,
+			topic:       w.topic,
 		}
 		e.run(ctx)
 	}()

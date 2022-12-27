@@ -10,7 +10,9 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/opensourceways/community-robot-lib/kafka"
 	"github.com/opensourceways/community-robot-lib/logrusutil"
+	"github.com/opensourceways/community-robot-lib/mq"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/yaml"
 
@@ -20,12 +22,17 @@ import (
 
 type options struct {
 	configFile     string
+	topic          string
 	concurrentSize int
 }
 
 func (o options) validate() error {
 	if o.configFile == "" {
 		return fmt.Errorf("config-file must be set")
+	}
+
+	if o.topic == "" {
+		return fmt.Errorf("topic must be set")
 	}
 
 	if o.concurrentSize <= 0 {
@@ -38,6 +45,7 @@ func gatherOptions(fs *flag.FlagSet, args ...string) options {
 	var o options
 
 	fs.StringVar(&o.configFile, "config-file", "", "Path to the config file.")
+	fs.StringVar(&o.topic, "topic", "", "The topic to which jobs need to be published ")
 	fs.IntVar(&o.concurrentSize, "concurrent-size", 500, "The concurrent size for synchronizing files of repo branch.")
 
 	fs.Parse(args)
@@ -59,6 +67,10 @@ func main() {
 		return
 	}
 
+	if err := initBroker(cfg); err != nil {
+		logrus.WithError(err).Fatal("Error init broker")
+	}
+
 	clients := initClients(cfg.Clients)
 	if len(clients) == 0 {
 		return
@@ -73,7 +85,7 @@ func main() {
 	for k, v := range clients {
 		clis[k] = v
 	}
-	wait, cancel := server.DoOnce(clis, cfg.SyncFiles, o.concurrentSize)
+	wait, cancel := server.DoOnce(clis, cfg.SyncFiles, o.concurrentSize, o.topic)
 
 	run(wait, cancel)
 }
@@ -139,4 +151,23 @@ func loadConfig(path string) (*configuration, error) {
 	v.SetDefault()
 
 	return v, v.Validate()
+}
+
+func initBroker(cfg *configuration) error {
+	tlsConfig, err := cfg.MQConfig.TLSConfig.TLSConfig()
+	if err != nil {
+		return err
+	}
+
+	err = kafka.Init(
+		mq.Addresses(cfg.MQConfig.Addresses...),
+		mq.SetTLSConfig(tlsConfig),
+		mq.Log(logrus.WithField("module", "broker")),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return kafka.Connect()
 }

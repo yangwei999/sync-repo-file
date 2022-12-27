@@ -8,7 +8,9 @@ import (
 
 	"github.com/opensourceways/community-robot-lib/config"
 	"github.com/opensourceways/community-robot-lib/interrupts"
+	"github.com/opensourceways/community-robot-lib/kafka"
 	"github.com/opensourceways/community-robot-lib/logrusutil"
+	"github.com/opensourceways/community-robot-lib/mq"
 	"github.com/opensourceways/community-robot-lib/utils"
 	"github.com/sirupsen/logrus"
 
@@ -19,6 +21,7 @@ import (
 type options struct {
 	configFile     string
 	startTime      string
+	topic          string
 	interval       int
 	concurrentSize int
 }
@@ -27,6 +30,11 @@ func (o options) validate() error {
 	if _, _, err := o.parseStartTime(); err != nil {
 		return err
 	}
+
+	if o.topic == "" {
+		return fmt.Errorf("topic must be set")
+	}
+
 	return nil
 }
 
@@ -63,6 +71,7 @@ func gatherOptions(fs *flag.FlagSet, args ...string) options {
 
 	fs.StringVar(&o.configFile, "config-file", "", "Path to the config file.")
 	fs.StringVar(&o.startTime, "start-time", "01:00", "Time to synchronize repo file for the first time. The format is Hour:Minute")
+	fs.StringVar(&o.topic, "topic", "", "The topic to which jobs need to be published ")
 	fs.IntVar(&o.interval, "interval", 24, "Interval between two synchronizations. The unit is hour")
 	fs.IntVar(&o.concurrentSize, "concurrent-size", 500, "The concurrent size for synchronizing files of repo branch.")
 
@@ -79,7 +88,7 @@ func main() {
 		return
 	}
 
-	agent := config.NewConfigAgent(func() config.PluginConfig {
+	agent := config.NewConfigAgent(func() config.Config {
 		return new(configuration)
 	})
 	if err := agent.Start(o.configFile); err != nil {
@@ -109,15 +118,18 @@ func main() {
 			clis[k] = v
 		}
 		logrus.Info("start")
-		server.DoOnce(clis, cfg.SyncFiles, o.concurrentSize)
+		server.DoOnce(clis, cfg.SyncFiles, o.concurrentSize, o.topic)
 	}
 
-	time.Sleep(o.getStartTime())
 	go task()
+
+	if err := initBroker(&agent); err != nil {
+		logrus.WithError(err).Fatal("Error init broker")
+	}
 
 	t := utils.NewTimer()
 
-	t.Start(func() { go task() }, time.Duration(o.interval)*time.Hour)
+	t.Start(func() { go task() }, time.Duration(o.interval)*time.Hour, o.getStartTime())
 
 	defer interrupts.WaitForGracefulShutdown()
 
@@ -129,11 +141,34 @@ func main() {
 			item.Stop()
 		}
 		close(ch)
+
+		_ = kafka.Disconnect()
 	})
 
 	<-ch
 }
 
-func newConfig() config.PluginConfig {
-	return new(configuration)
+func initBroker(agent *config.ConfigAgent) error {
+	cfg := new(configuration)
+	_, v := agent.GetConfig()
+	if c, ok := v.(*configuration); ok {
+		cfg = c
+	}
+
+	tlsConfig, err := cfg.MQConfig.TLSConfig.TLSConfig()
+	if err != nil {
+		return err
+	}
+
+	err = kafka.Init(
+		mq.Addresses(cfg.MQConfig.Addresses...),
+		mq.SetTLSConfig(tlsConfig),
+		mq.Log(logrus.WithField("module", "broker")),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return kafka.Connect()
 }

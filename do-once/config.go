@@ -1,10 +1,15 @@
 package main
 
-import "github.com/opensourceways/sync-repo-file/server"
+import (
+	"github.com/opensourceways/community-robot-lib/mq"
+
+	"github.com/opensourceways/sync-repo-file/server"
+)
 
 type configuration struct {
 	Clients   []clientConfig          `json:"clients,omitempty"`
 	SyncFiles []server.SyncFileConfig `json:"sync_files,omitempty"`
+	MQConfig  mq.MQConfig             `json:"mq_config" required:"true"`
 }
 
 func (c *configuration) Validate() error {
